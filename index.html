@@ -96,6 +96,14 @@ dialog[open]{animation:hoja .42s cubic-bezier(.2,.9,.3,1.1)}@keyframes hoja{from
 #buscar::placeholder{color:#94A3B8}#buscar:focus{border-color:var(--gold);background:rgba(255,255,255,.14)}
 .card.PENDIENTE{touch-action:pan-y}
 .tip{font-size:.75rem;color:var(--mute);text-align:center;margin:-4px 0 12px}
+.bloqueo{display:block;width:100%;margin:2px 0 12px;padding:13px;border-radius:12px;border:1.5px dashed #FCA5A5;background:#FEF2F2;color:var(--bad);font:600 .9rem Inter,sans-serif}
+.bloqueo.reabrir{border-color:#6EE7B7;background:#ECFDF5;color:var(--ok)}
+.aviso-bloq{background:#FEF2F2;border:1px solid #FECACA;color:#991B1B;border-radius:12px;padding:12px;font-size:.88rem;margin-bottom:12px}
+.day.bloq{background:rgba(185,28,28,.35)}.day.bloq b{text-decoration:line-through}
+.card.CANCELADA{border-left-color:#94A3B8;opacity:.55}.CANCELADA .badge{background:#E2E8F0;color:#475569}
+.aviso-fila{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--line)}
+.aviso-fila small{display:block;color:var(--mute);font-size:.8rem}.aviso-fila a{background:#25D366;color:#fff;text-decoration:none;font-weight:700;font-size:.85rem;padding:9px 14px;border-radius:10px;white-space:nowrap}
+@media(prefers-color-scheme:dark){.bloqueo{background:#2A1416}.aviso-bloq{background:#2A1416;color:#FCA5A5;border-color:#7F1D1D}.bloqueo.reabrir{background:#0F2A22}}
 </style>
 </head>
 <body>
@@ -115,6 +123,8 @@ dialog[open]{animation:hoja .42s cubic-bezier(.2,.9,.3,1.1)}@keyframes hoja{from
 <main>
   <div id="hero"></div>
   <div class="resumen"><div><b id="nTotal">0</b><span>citas del día</span></div><div><b id="nPend">0</b><span>por atender</span></div><div><b id="nAt">0</b><span>atendidas</span></div></div>
+  <button class="bloqueo" id="btnBloqueo" onclick="toggleBloqueo()"></button>
+  <div class="aviso-bloq" id="avisoBloq" hidden>🚫 Este día está marcado <b>sin consulta</b>. Los pacientes no pueden agendar.</div>
   <div class="tip">Desliza una cita → asistió · ← no asistió</div>
   <div id="lista"></div>
 </main>
@@ -130,6 +140,8 @@ dialog[open]{animation:hoja .42s cubic-bezier(.2,.9,.3,1.1)}@keyframes hoja{from
 
 <dialog id="dRea"><h2>Reagendar</h2><label>Nueva fecha y hora</label><input id="rFh" type="datetime-local"><input type="hidden" id="rId">
   <div class="row"><button onclick="dRea.close()">Cancelar</button><button class="pri" onclick="guardarRea()">Guardar</button></div></dialog>
+<dialog id="dAvisos"><h2>Avisar a los pacientes</h2><p style="color:var(--mute);font-size:.88rem;margin-bottom:12px">Toca "Avisar" en cada uno: se abre WhatsApp con el mensaje listo.</p><div id="avisosLista"></div>
+  <div class="row"><button class="pri" onclick="dAvisos.close()">Listo</button></div></dialog>
 <div id="toast"></div>
 
 <script>
@@ -180,6 +192,35 @@ function buscar(v){busq=normA(v.trim());pintar()}
     else{c.style.transform='';c.style.boxShadow=''}});
 })();
 
+// ===== DÍAS SIN CONSULTA (la doctora los bloquea; la página de pacientes deja de mostrarlos) =====
+let bloqueados=[];
+const fechaLargaA=f=>new Date(f+'T12:00').toLocaleDateString('es-MX',{weekday:'long',day:'numeric',month:'long'});
+function pintarBloqueo(){
+  const b=$('btnBloqueo'),av=$('avisoBloq');if(!b)return;const bl=bloqueados.includes(sel);
+  b.textContent=bl?'✅ Reabrir este día (sí habrá consulta)':'🚫 No daré consulta este día';b.classList.toggle('reabrir',bl);
+  av.hidden=!bl;
+}
+async function toggleBloqueo(){
+  const ref=db.collection('config').doc('agenda'),FV=firebase.firestore.FieldValue;
+  if(bloqueados.includes(sel)){
+    if(!confirm(`¿Reabrir el ${fechaLargaA(sel)}? Los pacientes podrán volver a agendar ese día.`))return;
+    try{await ref.set({bloqueados:FV.arrayRemove(sel)},{merge:true});toast('Día reabierto ✓')}catch(e){toast('Error: '+e.message)}return}
+  const pend=citas.filter(c=>(c.fechaHora||'').startsWith(sel)&&(c.estado||'PENDIENTE')==='PENDIENTE');
+  if(!confirm(`¿No darás consulta el ${fechaLargaA(sel)}?\n\nLos pacientes ya no podrán agendar ese día.`+(pend.length?`\n\nHay ${pend.length} cita(s) ese día: se marcarán como CANCELADAS y podrás avisarles por WhatsApp.`:'')))return;
+  try{
+    await ref.set({bloqueados:FV.arrayUnion(sel)},{merge:true});
+    for(const c of pend)await db.collection('citas').doc(c.id).update({estado:'CANCELADA'});
+    toast(pend.length?`Día bloqueado · ${pend.length} cita(s) canceladas`:'Día bloqueado ✓');
+    if(pend.length)mostrarAvisos(pend);
+  }catch(e){toast('Error: '+e.message)}
+}
+function mostrarAvisos(lista){
+  $('avisosLista').innerHTML=lista.map(c=>{const tel=String(c.telefono||'').replace(/\D/g,''),wa=tel.length===10?'52'+tel:tel;
+    const msg=`Hola ${c.paciente||''}, le escribimos de RG Ópticas. Lamentamos informarle que el ${fechaLargaA(c.fechaHora.slice(0,10))} la doctora no dará consulta, por lo que su cita de las ${c.fechaHora.slice(11,16)} h se canceló. Puede reagendar aquí: https://optica-rg--2.web.app/citas/ 🙏`;
+    return `<div class="aviso-fila"><div><b>${esc(c.paciente)}</b><small>${esc(c.fechaHora.slice(11,16))} · ${esc(c.motivo||'')}</small></div>${tel?`<a href="https://wa.me/${wa}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">Avisar 💬</a>`:'<small>Sin teléfono</small>'}</div>`}).join('');
+  $('dAvisos').showModal();
+}
+
 // ===== CONFIGURACIÓN =====
 const USAR_LOGIN = true; // true cuando actives Firebase Authentication y endurezcas las reglas de Firestore
 const ESPECIALISTA = 'María Patricia Rojas Centeno';
@@ -201,7 +242,7 @@ function pintarTira(){
   const base=new Date(); base.setHours(12); let h='';
   for(let i=-1;i<14;i++){const d=new Date(base);d.setDate(base.getDate()+i);const k=ymd(d);
     const tiene=citas.some(c=>(c.fechaHora||'').startsWith(k)&&c.estado!=='CANCELADA');
-    h+=`<button class="day ${k===sel?'sel':''} ${tiene?'has':''}" onclick="elegir('${k}')"><small>${DIAS[d.getDay()]}</small><b>${d.getDate()}</b><i></i></button>`;}
+    h+=`<button class="day ${k===sel?'sel':''} ${tiene?'has':''} ${bloqueados.includes(k)?'bloq':''}" onclick="elegir('${k}')"><small>${DIAS[d.getDay()]}</small><b>${d.getDate()}</b><i></i></button>`;}
   $('strip').innerHTML=h;
   const f=new Date(sel+'T12:00');$('fechaLarga').textContent=f.toLocaleDateString('es-MX',{weekday:'long',day:'numeric',month:'long'});
 }
@@ -210,7 +251,7 @@ function irHoy(){sel=ymd(new Date());pintar();$('strip').scrollLeft=0}
 
 // ===== LISTA =====
 function pintar(){
-  pintarTira();
+  pintarTira(); pintarBloqueo();
   const del=busq?citas.filter(c=>normA(c.paciente+' '+c.telefono+' '+c.motivo).includes(busq)).slice(-40).reverse():citas.filter(c=>(c.fechaHora||'').startsWith(sel)).sort((a,b)=>a.fechaHora.localeCompare(b.fechaHora));
   if(!cargado){$('lista').innerHTML='<div class="skel"></div>'.repeat(3);return}
   pintarHero(); contarNum($('nTotal'),del.length); contarNum($('nPend'),del.filter(c=>(c.estado||'PENDIENTE')==='PENDIENTE').length); contarNum($('nAt'),del.filter(c=>c.estado==='ASISTIÓ').length);
@@ -228,6 +269,7 @@ function pintar(){
 
 // ===== DATOS EN TIEMPO REAL =====
 function iniciarDatos(){
+  db.collection('config').doc('agenda').onSnapshot(d=>{bloqueados=(d.exists&&d.data().bloqueados)||[];pintar()},()=>{});
   db.collection('citas').orderBy('fechaHora','asc').onSnapshot(snap=>{
     citas=snap.docs.map(d=>({id:d.id,...d.data()}));
     if(!primera && !snap.metadata.hasPendingWrites) snap.docChanges().forEach(ch=>{ if(ch.type==='added'&&!ch.doc.metadata.hasPendingWrites){ avisoNueva(ch.doc.data()) } });
